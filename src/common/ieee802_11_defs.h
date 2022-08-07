@@ -495,6 +495,7 @@
 #define WLAN_EID_EXT_EHT_CAPABILITIES 108
 #define WLAN_EID_EXT_TID_TO_LINK_MAPPING 109
 #define WLAN_EID_EXT_MULTI_LINK_TRAFFIC_INDICATION 110
+#define WLAN_EID_EXT_AKM_SUITE_SELECTOR 114
 
 /* Extended Capabilities field */
 #define WLAN_EXT_CAPAB_20_40_COEX 0
@@ -1334,16 +1335,11 @@ struct ieee80211_ampe_ie {
 
 #define VHT_RX_NSS_MAX_STREAMS			    8
 
-/* VHT/EDMG channel widths */
+/* VHT operation information - channel widths */
 #define CHANWIDTH_USE_HT	0
 #define CHANWIDTH_80MHZ		1
 #define CHANWIDTH_160MHZ	2
 #define CHANWIDTH_80P80MHZ	3
-#define CHANWIDTH_2160MHZ	4
-#define CHANWIDTH_4320MHZ	5
-#define CHANWIDTH_6480MHZ	6
-#define CHANWIDTH_8640MHZ	7
-#define CHANWIDTH_40MHZ_6GHZ	8
 
 #define HE_NSS_MAX_STREAMS			    8
 

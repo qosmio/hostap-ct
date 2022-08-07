@@ -219,6 +219,8 @@ enum chan_width convert2width(int width)
 		return CHAN_WIDTH_80P80;
 	case NL80211_CHAN_WIDTH_160:
 		return CHAN_WIDTH_160;
+	case NL80211_CHAN_WIDTH_320:
+		return CHAN_WIDTH_320;
 	}
 	return CHAN_WIDTH_UNKNOWN;
 }
@@ -272,6 +274,10 @@ void nl80211_mark_disconnected(struct wpa_driver_nl80211_data *drv)
 	drv->associated = 0;
 	os_memset(drv->bssid, 0, ETH_ALEN);
 	drv->first_bss->freq = 0;
+#ifdef CONFIG_DRIVER_NL80211_QCA
+	os_free(drv->pending_roam_data);
+	drv->pending_roam_data = NULL;
+#endif /* CONFIG_DRIVER_NL80211_QCA */
 }
 
 
@@ -3198,7 +3204,9 @@ static int wpa_key_mgmt_to_suites(unsigned int key_mgmt_suites, u32 suites[],
 	__AKM(IEEE8021X_SHA256, 802_1X_SHA256);
 	__AKM(PSK_SHA256, PSK_SHA256);
 	__AKM(SAE, SAE);
+	__AKM(SAE_EXT_KEY, SAE_EXT_KEY);
 	__AKM(FT_SAE, FT_SAE);
+	__AKM(FT_SAE_EXT_KEY, FT_SAE_EXT_KEY);
 	__AKM(CCKM, CCKM);
 	__AKM(OSEN, OSEN);
 	__AKM(IEEE8021X_SUITE_B, 802_1X_SUITE_B);
@@ -4674,7 +4682,8 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 	if (drv->device_ap_sme) {
 		u32 flags = 0;
 
-		if (params->key_mgmt_suites & WPA_KEY_MGMT_SAE) {
+		if (params->key_mgmt_suites & (WPA_KEY_MGMT_SAE |
+					       WPA_KEY_MGMT_SAE_EXT_KEY)) {
 			/* Add the previously used flag attribute to support
 			 * older kernel versions and the newer flag bit for
 			 * newer kernels. */
@@ -4862,8 +4871,7 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 #endif /* CONFIG_IEEE80211AX */
 
 #ifdef CONFIG_SAE
-	if (((params->key_mgmt_suites & WPA_KEY_MGMT_SAE) ||
-	     (params->key_mgmt_suites & WPA_KEY_MGMT_FT_SAE)) &&
+	if (wpa_key_mgmt_sae(params->key_mgmt_suites) &&
 	    nl80211_put_sae_pwe(msg, params->sae_pwe) < 0)
 		goto fail;
 #endif /* CONFIG_SAE */
@@ -4973,6 +4981,9 @@ static int nl80211_put_freq_params(struct nl_msg *msg,
 			break;
 		case 160:
 			cw = NL80211_CHAN_WIDTH_160;
+			break;
+		case 320:
+			cw = NL80211_CHAN_WIDTH_320;
 			break;
 		default:
 			return -EINVAL;
@@ -6322,7 +6333,9 @@ static int nl80211_connect_common(struct wpa_driver_nl80211_data *drv,
 	    params->key_mgmt_suite == WPA_KEY_MGMT_IEEE8021X_SHA256 ||
 	    params->key_mgmt_suite == WPA_KEY_MGMT_PSK_SHA256 ||
 	    params->key_mgmt_suite == WPA_KEY_MGMT_SAE ||
+	    params->key_mgmt_suite == WPA_KEY_MGMT_SAE_EXT_KEY ||
 	    params->key_mgmt_suite == WPA_KEY_MGMT_FT_SAE ||
+	    params->key_mgmt_suite == WPA_KEY_MGMT_FT_SAE_EXT_KEY ||
 	    params->key_mgmt_suite == WPA_KEY_MGMT_IEEE8021X_SUITE_B ||
 	    params->key_mgmt_suite == WPA_KEY_MGMT_IEEE8021X_SUITE_B_192 ||
 	    params->key_mgmt_suite == WPA_KEY_MGMT_FT_IEEE8021X_SHA384 ||
@@ -6359,8 +6372,14 @@ static int nl80211_connect_common(struct wpa_driver_nl80211_data *drv,
 		case WPA_KEY_MGMT_SAE:
 			mgmt = RSN_AUTH_KEY_MGMT_SAE;
 			break;
+		case WPA_KEY_MGMT_SAE_EXT_KEY:
+			mgmt = RSN_AUTH_KEY_MGMT_SAE_EXT_KEY;
+			break;
 		case WPA_KEY_MGMT_FT_SAE:
 			mgmt = RSN_AUTH_KEY_MGMT_FT_SAE;
+			break;
+		case WPA_KEY_MGMT_FT_SAE_EXT_KEY:
+			mgmt = RSN_AUTH_KEY_MGMT_FT_SAE_EXT_KEY;
 			break;
 		case WPA_KEY_MGMT_IEEE8021X_SUITE_B:
 			mgmt = RSN_AUTH_KEY_MGMT_802_1X_SUITE_B;
@@ -6461,8 +6480,7 @@ static int nl80211_connect_common(struct wpa_driver_nl80211_data *drv,
 	    nl80211_put_fils_connect_params(drv, params, msg) != 0)
 		return -1;
 
-	if ((params->key_mgmt_suite == WPA_KEY_MGMT_SAE ||
-	     params->key_mgmt_suite == WPA_KEY_MGMT_FT_SAE) &&
+	if (wpa_key_mgmt_sae(params->key_mgmt_suite) &&
 	    (!(drv->capa.flags & WPA_DRIVER_FLAGS_SME)) &&
 	    nla_put_flag(msg, NL80211_ATTR_EXTERNAL_AUTH_SUPPORT))
 		return -1;
@@ -6512,8 +6530,7 @@ static int wpa_driver_nl80211_try_connect(
 		goto fail;
 
 #ifdef CONFIG_SAE
-	if ((params->key_mgmt_suite == WPA_KEY_MGMT_SAE ||
-	     params->key_mgmt_suite == WPA_KEY_MGMT_FT_SAE) &&
+	if (wpa_key_mgmt_sae(params->key_mgmt_suite) &&
 	    nl80211_put_sae_pwe(msg, params->sae_pwe) < 0)
 		goto fail;
 #endif /* CONFIG_SAE */
@@ -6624,8 +6641,7 @@ static int wpa_driver_nl80211_associate(
 
 		if (wpa_driver_nl80211_set_mode(priv, nlmode) < 0)
 			return -1;
-		if (params->key_mgmt_suite == WPA_KEY_MGMT_SAE ||
-		    params->key_mgmt_suite == WPA_KEY_MGMT_FT_SAE)
+		if (wpa_key_mgmt_sae(params->key_mgmt_suite))
 			bss->use_nl_connect = 1;
 		else
 			bss->use_nl_connect = 0;

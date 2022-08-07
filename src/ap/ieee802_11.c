@@ -982,7 +982,8 @@ void sae_accept_sta(struct hostapd_data *hapd, struct sta_info *sta)
 	sta->sae->peer_commit_scalar_accepted = sta->sae->peer_commit_scalar;
 	sta->sae->peer_commit_scalar = NULL;
 	wpa_auth_pmksa_add_sae(hapd->wpa_auth, sta->addr,
-			       sta->sae->pmk, sta->sae->pmkid);
+			       sta->sae->pmk, sta->sae->pmk_len,
+			       sta->sae->pmkid, sta->sae->akmp);
 	sae_sme_send_external_auth_status(hapd, sta, WLAN_STATUS_SUCCESS);
 }
 
@@ -1233,6 +1234,10 @@ static int sae_status_success(struct hostapd_data *hapd, u16 status_code)
 	if (sae_pwe == 0 && sae_pk)
 		sae_pwe = 2;
 #endif /* CONFIG_SAE_PK */
+	if (sae_pwe == 0 &&
+	    (hapd->conf->wpa_key_mgmt &
+	     (WPA_KEY_MGMT_SAE_EXT_KEY | WPA_KEY_MGMT_FT_SAE_EXT_KEY)))
+		sae_pwe = 2;
 
 	return ((sae_pwe == 0 || sae_pwe == 3) &&
 		status_code == WLAN_STATUS_SUCCESS) ||
@@ -2514,7 +2519,8 @@ static int pasn_wd_handle_sae_confirm(struct hostapd_data *hapd,
 	 * restrict this only for PASN.
 	 */
 	wpa_auth_pmksa_add_sae(hapd->wpa_auth, sta->addr,
-			       pasn->sae.pmk, pasn->sae.pmkid);
+			       pasn->sae.pmk, pasn->sae.pmk_len,
+			       pasn->sae.pmkid, pasn->sae.akmp);
 	return 0;
 }
 
@@ -4686,7 +4692,7 @@ static int check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
 		    sta->auth_alg == WLAN_AUTH_OPEN) {
 			struct rsn_pmksa_cache_entry *sa;
 			sa = wpa_auth_sta_get_pmksa(sta->wpa_sm);
-			if (!sa || sa->akmp != WPA_KEY_MGMT_SAE) {
+			if (!sa || !wpa_key_mgmt_sae(sa->akmp)) {
 				wpa_printf(MSG_DEBUG,
 					   "SAE: No PMKSA cache entry found for "
 					   MACSTR, MAC2STR(sta->addr));
@@ -7034,7 +7040,7 @@ u8 * hostapd_eid_txpower_envelope(struct hostapd_data *hapd, u8 *eid)
 #endif /* CONFIG_IEEE80211AX */
 
 	switch (hostapd_get_oper_chwidth(iconf)) {
-	case CHANWIDTH_USE_HT:
+	case CONF_OPER_CHWIDTH_USE_HT:
 		if (iconf->secondary_channel == 0) {
 			/* Max Transmit Power count = 0 (20 MHz) */
 			tx_pwr_count = 0;
@@ -7043,12 +7049,12 @@ u8 * hostapd_eid_txpower_envelope(struct hostapd_data *hapd, u8 *eid)
 			tx_pwr_count = 1;
 		}
 		break;
-	case CHANWIDTH_80MHZ:
+	case CONF_OPER_CHWIDTH_80MHZ:
 		/* Max Transmit Power count = 2 (20, 40, and 80 MHz) */
 		tx_pwr_count = 2;
 		break;
-	case CHANWIDTH_80P80MHZ:
-	case CHANWIDTH_160MHZ:
+	case CONF_OPER_CHWIDTH_80P80MHZ:
+	case CONF_OPER_CHWIDTH_160MHZ:
 		/* Max Transmit Power count = 3 (20, 40, 80, 160/80+80 MHz) */
 		tx_pwr_count = 3;
 		break;

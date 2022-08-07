@@ -674,6 +674,9 @@ static int calculate_chan_offset(int width, int freq, int cf1, int cf2)
 	case CHAN_WIDTH_80P80:
 		freq1 = cf1 - 30;
 		break;
+	case CHAN_WIDTH_320:
+		freq1 = cf1 - 150;
+		break;
 	case CHAN_WIDTH_UNKNOWN:
 	case CHAN_WIDTH_2160:
 	case CHAN_WIDTH_4320:
@@ -2167,7 +2170,6 @@ qca_nl80211_key_mgmt_auth_handler(struct wpa_driver_nl80211_data *drv,
 	if (!drv->roam_indication_done) {
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: Pending roam indication, delay processing roam+auth vendor event");
-		os_get_reltime(&drv->pending_roam_ind_time);
 
 		os_free(drv->pending_roam_data);
 		drv->pending_roam_data = os_memdup(data, len);
@@ -2841,6 +2843,9 @@ static void nl80211_sta_opmode_change_event(struct wpa_driver_nl80211_data *drv,
 		case NL80211_CHAN_WIDTH_160:
 			ed.sta_opmode.chan_width = CHAN_WIDTH_160;
 			break;
+		case NL80211_CHAN_WIDTH_320:
+			ed.sta_opmode.chan_width = CHAN_WIDTH_320;
+			break;
 		default:
 			ed.sta_opmode.chan_width = CHAN_WIDTH_UNKNOWN;
 			break;
@@ -3031,17 +3036,10 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 	if (cmd == NL80211_CMD_ROAM &&
 	    (drv->capa.flags & WPA_DRIVER_FLAGS_KEY_MGMT_OFFLOAD)) {
 		if (drv->pending_roam_data) {
-			struct os_reltime now, age;
-
-			os_get_reltime(&now);
-			os_reltime_sub(&now, &drv->pending_roam_ind_time, &age);
-			if (age.sec == 0 && age.usec < 100000) {
-				wpa_printf(MSG_DEBUG,
-					   "nl80211: Process pending roam+auth vendor event");
-				qca_nl80211_key_mgmt_auth(
-					drv, drv->pending_roam_data,
-					drv->pending_roam_data_len);
-			}
+			wpa_printf(MSG_DEBUG,
+				   "nl80211: Process pending roam+auth vendor event");
+			qca_nl80211_key_mgmt_auth(drv, drv->pending_roam_data,
+						  drv->pending_roam_data_len);
 			os_free(drv->pending_roam_data);
 			drv->pending_roam_data = NULL;
 			return;
