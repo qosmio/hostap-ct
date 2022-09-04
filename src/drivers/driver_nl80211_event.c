@@ -179,6 +179,11 @@ static const char * nl80211_command_to_string(enum nl80211_commands cmd)
 	C2S(NL80211_CMD_COLOR_CHANGE_COMPLETED)
 	C2S(NL80211_CMD_SET_FILS_AAD)
 	C2S(NL80211_CMD_ASSOC_COMEBACK)
+	C2S(NL80211_CMD_ADD_LINK)
+	C2S(NL80211_CMD_REMOVE_LINK)
+	C2S(NL80211_CMD_ADD_LINK_STA)
+	C2S(NL80211_CMD_MODIFY_LINK_STA)
+	C2S(NL80211_CMD_REMOVE_LINK_STA)
 	C2S(__NL80211_CMD_AFTER_LAST)
 	}
 #undef C2S
@@ -674,6 +679,9 @@ static int calculate_chan_offset(int width, int freq, int cf1, int cf2)
 	case CHAN_WIDTH_80P80:
 		freq1 = cf1 - 30;
 		break;
+	case CHAN_WIDTH_320:
+		freq1 = cf1 - 150;
+		break;
 	case CHAN_WIDTH_UNKNOWN:
 	case CHAN_WIDTH_2160:
 	case CHAN_WIDTH_4320:
@@ -1081,6 +1089,7 @@ static void mlme_event(struct i802_bss *bss,
 		       struct nlattr *wmm, struct nlattr *req_ie)
 {
 	struct wpa_driver_nl80211_data *drv = bss->drv;
+	u16 stype = 0, auth_type = 0;
 	const u8 *data;
 	size_t len;
 
@@ -1110,11 +1119,31 @@ static void mlme_event(struct i802_bss *bss,
 		   nl80211_command_to_string(cmd), bss->ifname,
 		   MAC2STR(bss->addr), MAC2STR(data + 4),
 		   MAC2STR(data + 4 + ETH_ALEN));
-	if (cmd != NL80211_CMD_FRAME_TX_STATUS && !(data[4] & 0x01) &&
-	    os_memcmp(bss->addr, data + 4, ETH_ALEN) != 0 &&
-	    (is_zero_ether_addr(bss->rand_addr) ||
-	     os_memcmp(bss->rand_addr, data + 4, ETH_ALEN) != 0) &&
-	    os_memcmp(bss->addr, data + 4 + ETH_ALEN, ETH_ALEN) != 0) {
+
+	/* PASN Authentication frame can be received with a different source MAC
+	 * address. Allow NL80211_CMD_FRAME event with foreign addresses also.
+	 */
+	if (cmd == NL80211_CMD_FRAME && len >= 24) {
+		const struct ieee80211_mgmt *mgmt;
+		u16 fc;
+
+		mgmt = (const struct ieee80211_mgmt *) data;
+		fc = le_to_host16(mgmt->frame_control);
+		stype = WLAN_FC_GET_STYPE(fc);
+		auth_type = le_to_host16(mgmt->u.auth.auth_alg);
+	}
+
+	if (cmd == NL80211_CMD_FRAME && stype == WLAN_FC_STYPE_AUTH &&
+	    auth_type == host_to_le16(WLAN_AUTH_PASN)) {
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: %s: Allow PASN frame for foreign address",
+			   bss->ifname);
+	} else if (cmd != NL80211_CMD_FRAME_TX_STATUS  &&
+		   !(data[4] & 0x01) &&
+		   os_memcmp(bss->addr, data + 4, ETH_ALEN) != 0 &&
+		   (is_zero_ether_addr(bss->rand_addr) ||
+		    os_memcmp(bss->rand_addr, data + 4, ETH_ALEN) != 0) &&
+		   os_memcmp(bss->addr, data + 4 + ETH_ALEN, ETH_ALEN) != 0) {
 		wpa_printf(MSG_MSGDUMP, "nl80211: %s: Ignore MLME frame event "
 			   "for foreign address", bss->ifname);
 		return;
@@ -2167,7 +2196,6 @@ qca_nl80211_key_mgmt_auth_handler(struct wpa_driver_nl80211_data *drv,
 	if (!drv->roam_indication_done) {
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: Pending roam indication, delay processing roam+auth vendor event");
-		os_get_reltime(&drv->pending_roam_ind_time);
 
 		os_free(drv->pending_roam_data);
 		drv->pending_roam_data = os_memdup(data, len);
@@ -2423,6 +2451,82 @@ static void qca_nl80211_p2p_lo_stop_event(struct wpa_driver_nl80211_data *drv,
 	wpa_supplicant_event(drv->ctx, EVENT_P2P_LO_STOP, &event);
 }
 
+
+#ifdef CONFIG_PASN
+
+static void qca_nl80211_pasn_auth(struct wpa_driver_nl80211_data *drv,
+				  u8 *data, size_t len)
+{
+	int ret = -EINVAL;
+	struct nlattr *attr;
+	struct nlattr *tb[QCA_WLAN_VENDOR_ATTR_MAX + 1];
+	struct nlattr *cfg[QCA_WLAN_VENDOR_ATTR_PASN_PEER_MAX + 1];
+	unsigned int n_peers = 0, idx = 0;
+	int rem_conf;
+	enum qca_wlan_vendor_pasn_action action;
+	union wpa_event_data event;
+
+	if (nla_parse(tb, QCA_WLAN_VENDOR_ATTR_PASN_MAX,
+		      (struct nlattr *) data, len, NULL) ||
+	    !tb[QCA_WLAN_VENDOR_ATTR_PASN_PEERS] ||
+	    !tb[QCA_WLAN_VENDOR_ATTR_PASN_ACTION]) {
+		return;
+	}
+
+	os_memset(&event, 0, sizeof(event));
+	action = nla_get_u32(tb[QCA_WLAN_VENDOR_ATTR_PASN_ACTION]);
+	switch (action) {
+	case QCA_WLAN_VENDOR_PASN_ACTION_AUTH:
+		event.pasn_auth.action = PASN_ACTION_AUTH;
+		break;
+	case QCA_WLAN_VENDOR_PASN_ACTION_DELETE_SECURE_RANGING_CONTEXT:
+		event.pasn_auth.action =
+			PASN_ACTION_DELETE_SECURE_RANGING_CONTEXT;
+		break;
+	default:
+		return;
+	}
+
+	nla_for_each_nested(attr, tb[QCA_WLAN_VENDOR_ATTR_PASN_PEERS], rem_conf)
+		n_peers++;
+
+	if (n_peers > WPAS_MAX_PASN_PEERS) {
+		wpa_printf(MSG_DEBUG, "nl80211: PASN auth: too many peers (%d)",
+			    n_peers);
+		return;
+	}
+
+	nla_for_each_nested(attr, tb[QCA_WLAN_VENDOR_ATTR_PASN_PEERS],
+			    rem_conf) {
+		struct nlattr *nl_src, *nl_peer;
+
+		ret = nla_parse_nested(cfg, QCA_WLAN_VENDOR_ATTR_PASN_PEER_MAX,
+				       attr, NULL);
+		if (ret)
+			return;
+		nl_src = cfg[QCA_WLAN_VENDOR_ATTR_PASN_PEER_SRC_ADDR];
+		nl_peer = cfg[QCA_WLAN_VENDOR_ATTR_PASN_PEER_MAC_ADDR];
+		if (nl_src)
+			os_memcpy(event.pasn_auth.peer[idx].own_addr, nl_src,
+				  ETH_ALEN);
+		if (nl_peer)
+			os_memcpy(event.pasn_auth.peer[idx].peer_addr, nl_peer,
+				  ETH_ALEN);
+		if (cfg[QCA_WLAN_VENDOR_ATTR_PASN_PEER_LTF_KEYSEED_REQUIRED])
+			event.pasn_auth.peer[idx].ltf_keyseed_required = true;
+		idx++;
+	}
+	event.pasn_auth.num_peers = n_peers;
+
+	wpa_printf(MSG_DEBUG,
+		   "nl80211: PASN auth action: %u, num_bssids: %d",
+		   event.pasn_auth.action,
+		   event.pasn_auth.num_peers);
+	wpa_supplicant_event(drv->ctx, EVENT_PASN_AUTH, &event);
+}
+
+#endif /* CONFIG_PASN */
+
 #endif /* CONFIG_DRIVER_NL80211_QCA */
 
 
@@ -2459,6 +2563,11 @@ static void nl80211_vendor_event_qca(struct wpa_driver_nl80211_data *drv,
 	case QCA_NL80211_VENDOR_SUBCMD_P2P_LISTEN_OFFLOAD_STOP:
 		qca_nl80211_p2p_lo_stop_event(drv, data, len);
 		break;
+#ifdef CONFIG_PASN
+	case QCA_NL80211_VENDOR_SUBCMD_PASN:
+		qca_nl80211_pasn_auth(drv, data, len);
+		break;
+#endif /* CONFIG_PASN */
 #endif /* CONFIG_DRIVER_NL80211_QCA */
 	default:
 		wpa_printf(MSG_DEBUG,
@@ -2841,6 +2950,9 @@ static void nl80211_sta_opmode_change_event(struct wpa_driver_nl80211_data *drv,
 		case NL80211_CHAN_WIDTH_160:
 			ed.sta_opmode.chan_width = CHAN_WIDTH_160;
 			break;
+		case NL80211_CHAN_WIDTH_320:
+			ed.sta_opmode.chan_width = CHAN_WIDTH_320;
+			break;
 		default:
 			ed.sta_opmode.chan_width = CHAN_WIDTH_UNKNOWN;
 			break;
@@ -2980,7 +3092,7 @@ static void nl80211_obss_color_collision(struct wpa_driver_nl80211_data *drv,
 		nla_get_u64(tb[NL80211_ATTR_OBSS_COLOR_BITMAP]);
 
 	wpa_printf(MSG_DEBUG, "nl80211: BSS color collision - bitmap %08llx",
-		   (unsigned long long)(data.bss_color_collision.bitmap));
+		   (long long unsigned int) data.bss_color_collision.bitmap);
 	wpa_supplicant_event(drv->ctx, EVENT_BSS_COLOR_COLLISION, &data);
 }
 
@@ -3031,17 +3143,10 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 	if (cmd == NL80211_CMD_ROAM &&
 	    (drv->capa.flags & WPA_DRIVER_FLAGS_KEY_MGMT_OFFLOAD)) {
 		if (drv->pending_roam_data) {
-			struct os_reltime now, age;
-
-			os_get_reltime(&now);
-			os_reltime_sub(&now, &drv->pending_roam_ind_time, &age);
-			if (age.sec == 0 && age.usec < 100000) {
-				wpa_printf(MSG_DEBUG,
-					   "nl80211: Process pending roam+auth vendor event");
-				qca_nl80211_key_mgmt_auth(
-					drv, drv->pending_roam_data,
-					drv->pending_roam_data_len);
-			}
+			wpa_printf(MSG_DEBUG,
+				   "nl80211: Process pending roam+auth vendor event");
+			qca_nl80211_key_mgmt_auth(drv, drv->pending_roam_data,
+						  drv->pending_roam_data_len);
 			os_free(drv->pending_roam_data);
 			drv->pending_roam_data = NULL;
 			return;

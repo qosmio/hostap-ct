@@ -1103,6 +1103,7 @@ class WpaSupplicant:
                       "engine", "fils_dh_group", "bssid_hint",
                       "dpp_csign", "dpp_csign_expiry",
                       "dpp_netaccesskey", "dpp_netaccesskey_expiry", "dpp_pfs",
+                      "dpp_connector_privacy",
                       "group_mgmt", "owe_group", "owe_only",
                       "owe_ptk_workaround",
                       "transition_disable", "sae_pk",
@@ -1141,7 +1142,7 @@ class WpaSupplicant:
             if "eap" in kwargs:
                 self.connect_network(id, timeout=20)
             else:
-                self.connect_network(id)
+                self.connect_network(id, timeout=15)
         else:
             self.dump_monitor()
             self.select_network(id)
