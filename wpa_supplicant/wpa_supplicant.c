@@ -1200,6 +1200,7 @@ void wpa_supplicant_clear_status(struct wpa_supplicant *wpa_s)
 	wpa_s->group_cipher = 0;
 	wpa_s->mgmt_group_cipher = 0;
 	wpa_s->key_mgmt = 0;
+	wpa_s->allowed_key_mgmts = 0;
 	if (wpa_s->wpa_state != WPA_INTERFACE_DISABLED)
 		wpa_supplicant_set_state(wpa_s, new_state);
 
@@ -1439,6 +1440,111 @@ void wpas_set_mgmt_group_cipher(struct wpa_supplicant *wpa_s,
 			 wpa_s->mgmt_group_cipher);
 	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_MFP,
 			 wpas_get_ssid_pmf(wpa_s, ssid));
+}
+
+
+static void wpas_update_allowed_key_mgmt(struct wpa_supplicant *wpa_s,
+					 struct wpa_ssid *ssid)
+{
+	int akm_count = wpa_s->max_num_akms;
+	u8 capab = 0;
+
+	if (akm_count < 2)
+		return;
+
+	akm_count--;
+	wpa_s->allowed_key_mgmts = 0;
+	switch (wpa_s->key_mgmt) {
+	case WPA_KEY_MGMT_PSK:
+		if (ssid->key_mgmt & WPA_KEY_MGMT_SAE) {
+			akm_count--;
+			wpa_s->allowed_key_mgmts |= WPA_KEY_MGMT_SAE;
+		}
+		if (!akm_count)
+			break;
+		if (ssid->key_mgmt & WPA_KEY_MGMT_SAE_EXT_KEY) {
+			akm_count--;
+			wpa_s->allowed_key_mgmts |= WPA_KEY_MGMT_SAE_EXT_KEY;
+		}
+		if (!akm_count)
+			break;
+		if (ssid->key_mgmt & WPA_KEY_MGMT_PSK_SHA256)
+			wpa_s->allowed_key_mgmts |=
+				WPA_KEY_MGMT_PSK_SHA256;
+		break;
+	case WPA_KEY_MGMT_PSK_SHA256:
+		if (ssid->key_mgmt & WPA_KEY_MGMT_SAE) {
+			akm_count--;
+			wpa_s->allowed_key_mgmts |= WPA_KEY_MGMT_SAE;
+		}
+		if (!akm_count)
+			break;
+		if (ssid->key_mgmt & WPA_KEY_MGMT_SAE_EXT_KEY) {
+			akm_count--;
+			wpa_s->allowed_key_mgmts |= WPA_KEY_MGMT_SAE_EXT_KEY;
+		}
+		if (!akm_count)
+			break;
+		if (ssid->key_mgmt & WPA_KEY_MGMT_PSK)
+			wpa_s->allowed_key_mgmts |= WPA_KEY_MGMT_PSK;
+		break;
+	case WPA_KEY_MGMT_SAE:
+		if (ssid->key_mgmt & WPA_KEY_MGMT_PSK) {
+			akm_count--;
+			wpa_s->allowed_key_mgmts |= WPA_KEY_MGMT_PSK;
+		}
+		if (!akm_count)
+			break;
+		if (ssid->key_mgmt & WPA_KEY_MGMT_SAE_EXT_KEY) {
+			akm_count--;
+			wpa_s->allowed_key_mgmts |= WPA_KEY_MGMT_SAE_EXT_KEY;
+		}
+		if (!akm_count)
+			break;
+		if (ssid->key_mgmt & WPA_KEY_MGMT_PSK_SHA256)
+			wpa_s->allowed_key_mgmts |=
+				WPA_KEY_MGMT_PSK_SHA256;
+		break;
+	case WPA_KEY_MGMT_SAE_EXT_KEY:
+		if (ssid->key_mgmt & WPA_KEY_MGMT_SAE) {
+			akm_count--;
+			wpa_s->allowed_key_mgmts |= WPA_KEY_MGMT_SAE;
+		}
+		if (!akm_count)
+			break;
+		if (ssid->key_mgmt & WPA_KEY_MGMT_PSK) {
+			akm_count--;
+			wpa_s->allowed_key_mgmts |= WPA_KEY_MGMT_PSK;
+		}
+		if (!akm_count)
+			break;
+		if (ssid->key_mgmt & WPA_KEY_MGMT_PSK_SHA256)
+			wpa_s->allowed_key_mgmts |=
+				WPA_KEY_MGMT_PSK_SHA256;
+		break;
+	default:
+		return;
+	}
+
+	if (wpa_s->conf->sae_pwe)
+		capab |= BIT(WLAN_RSNX_CAPAB_SAE_H2E);
+#ifdef CONFIG_SAE_PK
+	if (ssid->sae_pk)
+		capab |= BIT(WLAN_RSNX_CAPAB_SAE_PK);
+#endif /* CONFIG_SAE_PK */
+
+	if (!((wpa_s->allowed_key_mgmts &
+	       (WPA_KEY_MGMT_SAE | WPA_KEY_MGMT_SAE_EXT_KEY)) && capab))
+		return;
+
+	if (!wpa_s->rsnxe_len) {
+		wpa_s->rsnxe_len = 3;
+		wpa_s->rsnxe[0] = WLAN_EID_RSNX;
+		wpa_s->rsnxe[1] = 1;
+		wpa_s->rsnxe[2] = 0;
+	}
+
+	wpa_s->rsnxe[2] |= capab;
 }
 
 
@@ -1688,13 +1794,15 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 	} else if (sel & WPA_KEY_MGMT_FT_FILS_SHA384) {
 		wpa_s->key_mgmt = WPA_KEY_MGMT_FT_FILS_SHA384;
 		wpa_dbg(wpa_s, MSG_DEBUG, "WPA: using KEY_MGMT FT-FILS-SHA384");
-	} else if (sel & WPA_KEY_MGMT_FT_FILS_SHA256) {
-		wpa_s->key_mgmt = WPA_KEY_MGMT_FT_FILS_SHA256;
-		wpa_dbg(wpa_s, MSG_DEBUG, "WPA: using KEY_MGMT FT-FILS-SHA256");
 #endif /* CONFIG_IEEE80211R */
 	} else if (sel & WPA_KEY_MGMT_FILS_SHA384) {
 		wpa_s->key_mgmt = WPA_KEY_MGMT_FILS_SHA384;
 		wpa_dbg(wpa_s, MSG_DEBUG, "WPA: using KEY_MGMT FILS-SHA384");
+#ifdef CONFIG_IEEE80211R
+	} else if (sel & WPA_KEY_MGMT_FT_FILS_SHA256) {
+		wpa_s->key_mgmt = WPA_KEY_MGMT_FT_FILS_SHA256;
+		wpa_dbg(wpa_s, MSG_DEBUG, "WPA: using KEY_MGMT FT-FILS-SHA256");
+#endif /* CONFIG_IEEE80211R */
 	} else if (sel & WPA_KEY_MGMT_FILS_SHA256) {
 		wpa_s->key_mgmt = WPA_KEY_MGMT_FILS_SHA256;
 		wpa_dbg(wpa_s, MSG_DEBUG, "WPA: using KEY_MGMT FILS-SHA256");
@@ -2004,6 +2112,10 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 		wpa_s->deny_ptk0_rekey = 0;
 		wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_DENY_PTK0_REKEY, 0);
 	}
+
+	if (wpa_key_mgmt_cross_akm(wpa_s->key_mgmt) &&
+	    !(wpa_s->drv_flags & WPA_DRIVER_FLAGS_SME))
+		wpas_update_allowed_key_mgmt(wpa_s, ssid);
 
 	return 0;
 }
@@ -4032,6 +4144,7 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 	params.group_suite = cipher_group;
 	params.mgmt_group_suite = cipher_group_mgmt;
 	params.key_mgmt_suite = wpa_s->key_mgmt;
+	params.allowed_key_mgmts = wpa_s->allowed_key_mgmts;
 	params.wpa_proto = wpa_s->wpa_proto;
 	wpa_s->auth_alg = params.auth_alg;
 	params.mode = ssid->mode;
@@ -4051,7 +4164,9 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 
 	if ((wpa_s->drv_flags & WPA_DRIVER_FLAGS_4WAY_HANDSHAKE_PSK) &&
 	    (params.key_mgmt_suite == WPA_KEY_MGMT_PSK ||
-	     params.key_mgmt_suite == WPA_KEY_MGMT_FT_PSK)) {
+	     params.key_mgmt_suite == WPA_KEY_MGMT_FT_PSK ||
+	     (params.allowed_key_mgmts &
+	      (WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_FT_PSK)))) {
 		params.passphrase = ssid->passphrase;
 		if (ssid->psk_set)
 			params.psk = ssid->psk;
@@ -4075,9 +4190,8 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 		else
 			params.req_key_mgmt_offload = 1;
 
-		if ((params.key_mgmt_suite == WPA_KEY_MGMT_PSK ||
-		     params.key_mgmt_suite == WPA_KEY_MGMT_PSK_SHA256 ||
-		     params.key_mgmt_suite == WPA_KEY_MGMT_FT_PSK) &&
+		if ((wpa_key_mgmt_wpa_psk_no_sae(params.key_mgmt_suite) ||
+		     wpa_key_mgmt_wpa_psk_no_sae(params.allowed_key_mgmts)) &&
 		    ssid->psk_set)
 			params.psk = ssid->psk;
 	}
@@ -7134,6 +7248,7 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 		wpa_s->num_multichan_concurrent =
 			capa.num_multichan_concurrent;
 		wpa_s->wmm_ac_supported = capa.wmm_ac_supported;
+		wpa_s->max_num_akms = capa.max_num_akms;
 
 		if (capa.mac_addr_rand_scan_supported)
 			wpa_s->mac_addr_rand_supported |= MAC_ADDR_RAND_SCAN;
@@ -7148,6 +7263,9 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 		    wpa_s->extended_capa[2] & 0x40)
 			wpa_s->multi_bss_support = 1;
 	}
+#ifdef CONFIG_PASN
+	wpa_pasn_sm_set_caps(wpa_s->wpa, wpa_s->drv_flags2);
+#endif /* CONFIG_PASN */
 	if (wpa_s->max_remain_on_chan == 0)
 		wpa_s->max_remain_on_chan = 1000;
 

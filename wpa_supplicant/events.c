@@ -338,6 +338,7 @@ void wpa_supplicant_mark_disassoc(struct wpa_supplicant *wpa_s)
 	wpa_s->current_ssid = NULL;
 	eapol_sm_notify_config(wpa_s->eapol, NULL, NULL);
 	wpa_s->key_mgmt = 0;
+	wpa_s->allowed_key_mgmts = 0;
 
 	wpas_rrm_reset(wpa_s);
 	wpa_s->wnmsleep_used = 0;
@@ -2906,6 +2907,28 @@ static int wpa_supplicant_use_own_rsne_params(struct wpa_supplicant *wpa_s,
 		wpa_supplicant_deauthenticate(
 			wpa_s, WLAN_REASON_AKMP_NOT_VALID);
 		return -1;
+	}
+
+	/*
+	 * Update PMK in wpa_sm and the driver if roamed to WPA/WPA2 PSK from a
+	 * different AKM.
+	 */
+	if (wpa_s->key_mgmt != ie.key_mgmt &&
+	    wpa_key_mgmt_wpa_psk_no_sae(ie.key_mgmt)) {
+		if (!ssid->psk_set) {
+			wpa_dbg(wpa_s, MSG_INFO,
+				"No PSK available for association");
+			wpas_auth_failed(wpa_s, "NO_PSK_AVAILABLE");
+			return -1;
+		}
+
+		wpa_sm_set_pmk(wpa_s->wpa, ssid->psk, PMK_LEN, NULL, NULL);
+		if (wpa_s->conf->key_mgmt_offload &&
+		    (wpa_s->drv_flags & WPA_DRIVER_FLAGS_KEY_MGMT_OFFLOAD) &&
+		    wpa_drv_set_key(wpa_s, 0, NULL, 0, 0, NULL, 0, ssid->psk,
+				    PMK_LEN, KEY_FLAG_PMK))
+			wpa_dbg(wpa_s, MSG_ERROR,
+				"WPA: Cannot set PMK for key management offload");
 	}
 
 	wpa_s->key_mgmt = ie.key_mgmt;
@@ -5920,6 +5943,11 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 		sme_external_auth_trigger(wpa_s, data);
 #endif /* CONFIG_SAE */
 		break;
+#ifdef CONFIG_PASN
+	case EVENT_PASN_AUTH:
+		wpas_pasn_auth_trigger(wpa_s, &data->pasn_auth);
+		break;
+#endif /* CONFIG_PASN */
 	case EVENT_PORT_AUTHORIZED:
 		wpa_supplicant_event_port_authorized(wpa_s);
 		break;

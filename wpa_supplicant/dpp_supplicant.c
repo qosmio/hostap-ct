@@ -3884,13 +3884,6 @@ void wpas_dpp_rx_action(struct wpa_supplicant *wpa_s, const u8 *src,
 		return;
 	if (WPA_GET_BE24(buf) != OUI_WFA || buf[3] != DPP_OUI_TYPE)
 		return;
-#ifdef CONFIG_TESTING_OPTIONS
-	if (wpa_s->dpp_discard_public_action) {
-		wpa_printf(MSG_DEBUG,
-			   "TESTING: Discard received DPP Public Action frame");
-		return;
-	}
-#endif /* CONFIG_TESTING_OPTIONS */
 	hdr = buf;
 	buf += 4;
 	len -= 4;
@@ -3902,6 +3895,15 @@ void wpas_dpp_rx_action(struct wpa_supplicant *wpa_s, const u8 *src,
 		   "DPP: Received DPP Public Action frame crypto suite %u type %d from "
 		   MACSTR " freq=%u",
 		   crypto_suite, type, MAC2STR(src), freq);
+#ifdef CONFIG_TESTING_OPTIONS
+	if (wpa_s->dpp_discard_public_action &&
+	    type != DPP_PA_PEER_DISCOVERY_RESP &&
+	    type != DPP_PA_PRIV_PEER_INTRO_NOTIFY) {
+		wpa_printf(MSG_DEBUG,
+			   "TESTING: Discard received DPP Public Action frame");
+		return;
+	}
+#endif /* CONFIG_TESTING_OPTIONS */
 	if (crypto_suite != 1) {
 		wpa_printf(MSG_DEBUG, "DPP: Unsupported crypto suite %u",
 			   crypto_suite);
@@ -4919,29 +4921,20 @@ static void wpas_dpp_chirp_start(struct wpa_supplicant *wpa_s)
 }
 
 
-static void wpas_dpp_chirp_scan_res_handler(struct wpa_supplicant *wpa_s,
-					    struct wpa_scan_results *scan_res)
+static int * wpas_dpp_presence_ann_channels(struct wpa_supplicant *wpa_s,
+					    struct dpp_bootstrap_info *bi)
 {
-	struct dpp_bootstrap_info *bi = wpa_s->dpp_chirp_bi;
 	unsigned int i;
 	struct hostapd_hw_modes *mode;
 	int c;
 	struct wpa_bss *bss;
 	bool chan6 = wpa_s->hw.modes == NULL;
-
-	if (!bi && !wpa_s->dpp_reconfig_ssid)
-		return;
-
-	wpa_s->dpp_chirp_scan_done = 1;
-
-	os_free(wpa_s->dpp_chirp_freqs);
-	wpa_s->dpp_chirp_freqs = NULL;
+	int *freqs = NULL;
 
 	/* Channels from own bootstrapping info */
 	if (bi) {
 		for (i = 0; i < bi->num_freq; i++)
-			int_array_add_unique(&wpa_s->dpp_chirp_freqs,
-					     bi->freq[i]);
+			int_array_add_unique(&freqs, bi->freq[i]);
 	}
 
 	/* Preferred chirping channels */
@@ -4959,7 +4952,7 @@ static void wpas_dpp_chirp_scan_res_handler(struct wpa_supplicant *wpa_s,
 		}
 	}
 	if (chan6)
-		int_array_add_unique(&wpa_s->dpp_chirp_freqs, 2437);
+		int_array_add_unique(&freqs, 2437);
 
 	mode = get_mode(wpa_s->hw.modes, wpa_s->hw.num_modes,
 			HOSTAPD_MODE_IEEE80211A, false);
@@ -4978,9 +4971,9 @@ static void wpas_dpp_chirp_scan_res_handler(struct wpa_supplicant *wpa_s,
 				chan149 = 1;
 		}
 		if (chan149)
-			int_array_add_unique(&wpa_s->dpp_chirp_freqs, 5745);
+			int_array_add_unique(&freqs, 5745);
 		else if (chan44)
-			int_array_add_unique(&wpa_s->dpp_chirp_freqs, 5220);
+			int_array_add_unique(&freqs, 5220);
 	}
 
 	mode = get_mode(wpa_s->hw.modes, wpa_s->hw.num_modes,
@@ -4993,7 +4986,7 @@ static void wpas_dpp_chirp_scan_res_handler(struct wpa_supplicant *wpa_s,
 					   HOSTAPD_CHAN_RADAR)) ||
 			    chan->freq != 60480)
 				continue;
-			int_array_add_unique(&wpa_s->dpp_chirp_freqs, 60480);
+			int_array_add_unique(&freqs, 60480);
 			break;
 		}
 	}
@@ -5002,9 +4995,25 @@ static void wpas_dpp_chirp_scan_res_handler(struct wpa_supplicant *wpa_s,
 	 * Connectivity element */
 	dl_list_for_each(bss, &wpa_s->bss, struct wpa_bss, list) {
 		if (wpa_bss_get_vendor_ie(bss, DPP_CC_IE_VENDOR_TYPE))
-			int_array_add_unique(&wpa_s->dpp_chirp_freqs,
-					     bss->freq);
+			int_array_add_unique(&freqs, bss->freq);
 	}
+
+	return freqs;
+}
+
+
+static void wpas_dpp_chirp_scan_res_handler(struct wpa_supplicant *wpa_s,
+					    struct wpa_scan_results *scan_res)
+{
+	struct dpp_bootstrap_info *bi = wpa_s->dpp_chirp_bi;
+
+	if (!bi && !wpa_s->dpp_reconfig_ssid)
+		return;
+
+	wpa_s->dpp_chirp_scan_done = 1;
+
+	os_free(wpa_s->dpp_chirp_freqs);
+	wpa_s->dpp_chirp_freqs = wpas_dpp_presence_ann_channels(wpa_s, bi);
 
 	if (!wpa_s->dpp_chirp_freqs ||
 	    eloop_register_timeout(0, 0, wpas_dpp_chirp_next, wpa_s, NULL) < 0)
@@ -5313,34 +5322,6 @@ static int wpas_dpp_pb_announce(struct wpa_supplicant *wpa_s, int freq);
 static void wpas_dpp_pb_next(void *eloop_ctx, void *timeout_ctx);
 
 
-static bool wpas_dpp_pb_chan_ok(int flags)
-{
-	return !(flags & (HOSTAPD_CHAN_DISABLED |
-			  HOSTAPD_CHAN_NO_IR |
-			  HOSTAPD_CHAN_RADAR));
-}
-
-
-static int wpas_dpp_pb_channels(struct wpa_supplicant *wpa_s)
-{
-	struct hostapd_hw_modes *mode;
-	int m, c;
-
-	for (m = 0; m < wpa_s->hw.num_modes; m++) {
-		mode = &wpa_s->hw.modes[m];
-		for (c = 0; c < mode->num_channels; c++) {
-			struct hostapd_channel_data *chan = &mode->channels[c];
-
-			if (!wpas_dpp_pb_chan_ok(chan->flag))
-				continue;
-			int_array_add_unique(&wpa_s->dpp_pb_freqs, chan->freq);
-		}
-	}
-
-	return wpa_s->dpp_pb_freqs ? 0 : -1;
-}
-
-
 static void wpas_dpp_pb_tx_status(struct wpa_supplicant *wpa_s,
 				  unsigned int freq, const u8 *dst,
 				  const u8 *src, const u8 *bssid,
@@ -5529,6 +5510,22 @@ static int wpas_dpp_push_button_configurator(struct wpa_supplicant *wpa_s,
 }
 
 
+static void wpas_dpp_pb_scan_res_handler(struct wpa_supplicant *wpa_s,
+					 struct wpa_scan_results *scan_res)
+{
+	if (!wpa_s->dpp_pb_time.sec && !wpa_s->dpp_pb_time.usec)
+		return;
+
+	os_free(wpa_s->dpp_pb_freqs);
+	wpa_s->dpp_pb_freqs = wpas_dpp_presence_ann_channels(wpa_s, NULL);
+
+	wpa_printf(MSG_DEBUG, "DPP: Scan completed for PB discovery");
+	if (!wpa_s->dpp_pb_freqs ||
+	    eloop_register_timeout(0, 0, wpas_dpp_pb_next, wpa_s, NULL) < 0)
+		wpas_dpp_push_button_stop(wpa_s);
+}
+
+
 int wpas_dpp_push_button(struct wpa_supplicant *wpa_s, const char *cmd)
 {
 	int res;
@@ -5548,8 +5545,6 @@ int wpas_dpp_push_button(struct wpa_supplicant *wpa_s, const char *cmd)
 
 	wpa_s->dpp_pb_configurator = false;
 
-	if (wpas_dpp_pb_channels(wpa_s) < 0)
-		return -1;
 	wpa_s->dpp_pb_freq_idx = 0;
 
 	res = dpp_bootstrap_gen(wpa_s->dpp, "type=pkex");
@@ -5567,7 +5562,12 @@ int wpas_dpp_push_button(struct wpa_supplicant *wpa_s, const char *cmd)
 	if (!wpa_s->dpp_pb_announcement)
 		return -1;
 
-	return eloop_register_timeout(0, 0, wpas_dpp_pb_next, wpa_s, NULL);
+	wpa_printf(MSG_DEBUG,
+		   "DPP: Scan to create channel list for PB discovery");
+	wpa_s->scan_req = MANUAL_SCAN_REQ;
+	wpa_s->scan_res_handler = wpas_dpp_pb_scan_res_handler;
+	wpa_supplicant_req_scan(wpa_s, 0, 0);
+	return 0;
 }
 
 
@@ -5615,6 +5615,11 @@ void wpas_dpp_push_button_stop(struct wpa_supplicant *wpa_s)
 
 	str_clear_free(wpa_s->dpp_pb_cmd);
 	wpa_s->dpp_pb_cmd = NULL;
+
+	if (wpa_s->scan_res_handler == wpas_dpp_pb_scan_res_handler) {
+		wpas_abort_ongoing_scan(wpa_s);
+		wpa_s->scan_res_handler = NULL;
+	}
 }
 
 #endif /* CONFIG_DPP3 */
